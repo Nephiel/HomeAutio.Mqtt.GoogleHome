@@ -88,35 +88,52 @@ namespace HomeAutio.Mqtt.GoogleHome
             var message = e.ApplicationMessage.ConvertPayloadToString();
             _log.LogInformation("MQTT message received for topic " + e.ApplicationMessage.Topic + ": " + message);
 
-            if (e.ApplicationMessage.Topic == TopicRoot + "/REQUEST_SYNC")
+            try
             {
-                // Handle REQUEST_SYNC
-                _googleHomeGraphClient.RequestSyncAsync()
-                    .GetAwaiter().GetResult();
-            }
-            else if (_stateCache.ContainsKey(e.ApplicationMessage.Topic))
-            {
-                _stateCache[e.ApplicationMessage.Topic] = message;
 
-                // Identify devices that handle reportState
-                var devices = _deviceRepository.GetAll()
-                    .Where(x => x.WillReportState)
-                    .Where(x => x.Traits.Any(trait => trait.State.Values.Any(state => state.Topic == e.ApplicationMessage.Topic)))
-                    .ToList();
-
-                // Send updated to Google Home Graph
-                if (devices.Count() > 0)
+                if (e.ApplicationMessage.Topic == TopicRoot + "/REQUEST_SYNC")
                 {
-                    _googleHomeGraphClient.SendUpdatesAsync(devices, _stateCache)
+                    // Handle REQUEST_SYNC
+                    _log.LogDebug("Handling REQUEST_SYNC");
+                    _googleHomeGraphClient.RequestSyncAsync()
                         .GetAwaiter().GetResult();
                 }
+                else if (_stateCache.ContainsKey(e.ApplicationMessage.Topic))
+                {
+                    _log.LogDebug("Updating state cache for topic {0}", e.ApplicationMessage.Topic);
+                    _stateCache[e.ApplicationMessage.Topic] = message;
+
+                    _log.LogDebug("Identifying devices that handle reportState");
+                    // Identify devices that handle reportState
+                    var devices = _deviceRepository.GetAll()
+                        .Where(x => x.WillReportState)
+                        .Where(x => x.Traits.Any(trait => trait.State.Values.Any(state => state.Topic == e.ApplicationMessage.Topic)))
+                        .ToList();
+
+                    // Send updated to Google Home Graph
+                    if (devices.Count() > 0)
+                    {
+                        _log.LogDebug("Sending updates to Google Home Graph");
+                        _googleHomeGraphClient.SendUpdatesAsync(devices, _stateCache)
+                            .GetAwaiter().GetResult();
+                    }
+                    else
+                    {
+                        _log.LogDebug("No updates to send");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogError("Mqtt_MqttMsgPublishReceived Exception: {0}.", ex.Message);
+                throw ex;
             }
         }
 
         #region Google Home Handlers
 
         /// <summary>
-        /// Hanlder for Google Home commands.
+        /// Handler for Google Home commands.
         /// </summary>
         /// <param name="command">The command to handle.</param>
         private async void HandleGoogleHomeCommand(Command command)

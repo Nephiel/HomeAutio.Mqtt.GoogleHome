@@ -10,6 +10,10 @@ using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 using Newtonsoft.Json;
 
+using System.IO;
+using System.Threading;
+using Google.Apis.Auth.OAuth2;
+
 namespace HomeAutio.Mqtt.GoogleHome
 {
     /// <summary>
@@ -25,8 +29,9 @@ namespace HomeAutio.Mqtt.GoogleHome
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly string _agentUserId;
         private readonly string _googleHomeGraphApiKey;
-        private readonly ServiceAccount _serviceAccount;
+        private readonly string _serviceAccountFilePath;
 
+        private ServiceAccountCredential _saCredential;
         private AccessTokenResponse _accessToken;
         private object _tokenRefreshLock = new object();
 
@@ -35,13 +40,13 @@ namespace HomeAutio.Mqtt.GoogleHome
         /// </summary>
         /// <param name="logger">Logging instance.</param>
         /// <param name="httpClientFactory">HttpClient factory.</param>
-        /// <param name="serviceAccount">Service account information.</param>
+        /// <param name="serviceAccountFilePath">Service account JSON file path.</param>
         /// <param name="agentUserId">Agent user id.</param>
         /// <param name="googleHomeGraphApiKey">Google Home Graph API key.</param>
         public GoogleHomeGraphClient(
             ILogger<GoogleHomeGraphClient> logger,
             IHttpClientFactory httpClientFactory,
-            ServiceAccount serviceAccount,
+            string serviceAccountFilePath,
             string agentUserId,
             string googleHomeGraphApiKey)
         {
@@ -49,7 +54,7 @@ namespace HomeAutio.Mqtt.GoogleHome
             _httpClientFactory = httpClientFactory;
             _agentUserId = agentUserId;
             _googleHomeGraphApiKey = googleHomeGraphApiKey;
-            _serviceAccount = serviceAccount;
+            _serviceAccountFilePath = serviceAccountFilePath;
         }
 
         /// <summary>
@@ -81,6 +86,10 @@ namespace HomeAutio.Mqtt.GoogleHome
             var response = await client.SendAsync(requestMessage);
 
             _log.LogInformation("Sent REQUEST_SYNC to Google Home Graph");
+
+            string rep = await response.Content.ReadAsStringAsync();
+            _log.LogDebug("Got response to REQUEST_SYNC from Google Home Graph: " + rep);
+
         }
 
         /// <summary>
@@ -92,7 +101,7 @@ namespace HomeAutio.Mqtt.GoogleHome
         public async Task SendUpdatesAsync(IList<Models.State.Device> devices, IDictionary<string, string> stateCache)
         {
             // If no service account has been provided, don't attempt to call
-            if (_serviceAccount == null)
+            if (_serviceAccountFilePath == null)
             {
                 _log.LogWarning("WillReportState triggered but Google Home Graph serviceAccountFile setting was blank, or the file didn't exist");
                 return;
@@ -101,42 +110,65 @@ namespace HomeAutio.Mqtt.GoogleHome
             // Ensure access token is available
             if (_accessToken == null || _accessToken.ExpiresAt <= DateTime.Now.AddMinutes(-1))
             {
+                _log.LogDebug("Retrieving access token");
                 lock (_tokenRefreshLock)
                 {
-                    _accessToken = GetAccessToken(ConstructJwt())
-                        .GetAwaiter().GetResult();
+                    try
+                    {
+                        _accessToken = GetAccessToken(ConstructJwt()).GetAwaiter().GetResult();
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogError("SendUpdatesAsync Exception: {0}.", ex.Message);
+                        _accessToken = null;
+                    }
                 }
             }
 
-            var request = new Request
+            if (_accessToken == null)
             {
-                RequestId = Guid.NewGuid().ToString(),
-                AgentUserId = _agentUserId,
-                Payload = new QueryResponsePayload
+                _log.LogWarning("AccessToken is unavailable, aborting");
+            }
+            else
+            {
+                _log.LogDebug("Building request");
+                var request = new Request
                 {
-                    Devices = new Devices
+                    RequestId = Guid.NewGuid().ToString(),
+                    AgentUserId = _agentUserId,
+                    Payload = new QueryResponsePayload
                     {
-                        States = devices.ToDictionary(
-                            device => device.Id,
-                            device => device.GetGoogleState(stateCache))
+                        Devices = new Devices
+                        {
+                            States = devices.ToDictionary(
+                                device => device.Id,
+                                device => device.GetGoogleState(stateCache))
+                        }
                     }
-                }
-            };
+                };
 
-            var requestMessage = new HttpRequestMessage
-            {
-                Method = HttpMethod.Post,
-                RequestUri = new Uri(_googleHomeGraphApiReportStateUri),
-                Content = new StringContent(JsonConvert.SerializeObject(request))
-            };
+                _log.LogDebug("Building requestMessage");
+                var requestMessage = new HttpRequestMessage
+                {
+                    Method = HttpMethod.Post,
+                    RequestUri = new Uri(_googleHomeGraphApiReportStateUri),
+                    Content = new StringContent(JsonConvert.SerializeObject(request))
+                };
 
-            // Add access token
-            requestMessage.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _accessToken.AccessToken);
+                _log.LogDebug("Adding access token");
+                // Add access token
+                requestMessage.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _accessToken.AccessToken);
 
-            var client = _httpClientFactory.CreateClient();
-            var response = await client.SendAsync(requestMessage);
+                _log.LogDebug("Creating client");
+                var client = _httpClientFactory.CreateClient();
+                _log.LogDebug("Requesting response");
+                var response = await client.SendAsync(requestMessage);
 
-            _log.LogInformation("Sent update to Google Home Graph for devices: " + string.Join(", ", devices.Select(x => x.Id)));
+                _log.LogInformation("Sent update to Google Home Graph for devices: " + string.Join(", ", devices.Select(x => x.Id)));
+
+                string rep = await response.Content.ReadAsStringAsync();
+                _log.LogDebug("Got response from Google Home Graph for devices: " + rep);
+            }
         }
 
         /// <summary>
@@ -155,7 +187,7 @@ namespace HomeAutio.Mqtt.GoogleHome
             var request = new HttpRequestMessage
             {
                 Method = HttpMethod.Post,
-                RequestUri = new Uri(_serviceAccount.TokenUri),
+                RequestUri = new Uri(_saCredential.TokenServerUrl),
                 Content = new FormUrlEncodedContent(paramaters)
             };
 
@@ -176,17 +208,24 @@ namespace HomeAutio.Mqtt.GoogleHome
         /// <returns>A JWT token.</returns>
         private string ConstructJwt()
         {
-            // Get signing key
-            byte[] certBuffer = GetBytesFromPEM(_serviceAccount.PrivateKey, "PRIVATE KEY");
-            var securityKey = new SymmetricSecurityKey(certBuffer);
-            var signingCredentials = new SigningCredentials(securityKey, SecurityAlgorithms.RsaSha256Signature);
+            // Read credentials from the credentials .json file.
+            using (var fs = new FileStream(_serviceAccountFilePath, FileMode.Open, FileAccess.Read))
+            {
+                _saCredential = ServiceAccountCredential.FromServiceAccountData(fs);
+            }
+
+            // Encryption algorithm must be RSA SHA-256, according to
+            // https://developers.google.com/identity/protocols/OAuth2ServiceAccount
+            var signingCredentials = new SigningCredentials(
+                new RsaSecurityKey(_saCredential.Key),
+                SecurityAlgorithms.RsaSha256);
 
             // Create auth token
             var claims = new List<Claim> { new Claim("scope", _homeGraphScope) };
             var header = new JwtHeader(signingCredentials);
             var payload = new JwtPayload(
-                _serviceAccount.ClientEmail,
-                _serviceAccount.TokenUri,
+                _saCredential.Id,
+                _saCredential.TokenServerUrl,
                 claims,
                 DateTime.Now,
                 DateTime.Now.AddHours(1),
@@ -199,30 +238,6 @@ namespace HomeAutio.Mqtt.GoogleHome
             _log.LogDebug("Built JWT request: " + token);
 
             return token;
-        }
-
-        /// <summary>
-        /// Extracts key parts from a PEM string.
-        /// </summary>
-        /// <param name="pemString">String to extract.</param>
-        /// <param name="section">Section of key to extract.</param>
-        /// <returns>The extracted portion as a byte array.</returns>
-        private byte[] GetBytesFromPEM(string pemString, string section)
-        {
-            var header = string.Format("-----BEGIN {0}-----", section);
-            var footer = string.Format("-----END {0}-----", section);
-
-            var start = pemString.IndexOf(header, StringComparison.Ordinal);
-            if (start < 0)
-                return null;
-
-            start += header.Length;
-            var end = pemString.IndexOf(footer, start, StringComparison.Ordinal) - start;
-
-            if (end < 0)
-                return null;
-
-            return Convert.FromBase64String(pemString.Substring(start, end));
         }
     }
 }
