@@ -80,6 +80,7 @@ namespace HomeAutio.Mqtt.GoogleHome
         /// <returns>A list of <see cref="Device"/>.</returns>
         public IList<Device> GetAll()
         {
+            _logger.LogDebug("GetAll returning: " + JsonConvert.SerializeObject(_devices.Values.ToList()));
             return _devices.Values.ToList();
         }
 

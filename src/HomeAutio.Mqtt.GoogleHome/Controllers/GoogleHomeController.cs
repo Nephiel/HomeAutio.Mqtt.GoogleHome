@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+using System;
+using System.Collections.Generic;
 using System.Linq;
 using Easy.MessageHub;
 using HomeAutio.Mqtt.GoogleHome.Models.State;
@@ -7,6 +8,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
 
 namespace HomeAutio.Mqtt.GoogleHome.Controllers
 {
@@ -159,6 +161,7 @@ namespace HomeAutio.Mqtt.GoogleHome.Controllers
                 executionResponsePayload.Commands.Add(commandResponse);
             }
 
+            _log.LogDebug("executionResponsePayload contains: " + JsonConvert.SerializeObject(executionResponsePayload));
             return executionResponsePayload;
         }
 
@@ -170,14 +173,40 @@ namespace HomeAutio.Mqtt.GoogleHome.Controllers
         private Models.Response.QueryResponsePayload HandleQueryIntent(Models.Request.QueryIntent intent)
         {
             _log.LogInformation("Received QUERY intent for devices: " + string.Join(", ", intent.Payload.Devices.Select(x => x.Id)));
+            _log.LogDebug("Devices in request payload: " + JsonConvert.SerializeObject(intent.Payload.Devices));
 
+            _log.LogDebug("Building list of devices for response");
+            var devices = new Dictionary<string, IDictionary<string,object>>();
+            foreach (var device in intent.Payload.Devices)
+            {
+                if (_deviceRepository.Get(device.Id) != null)
+                {
+                    if (devices.ContainsKey(device.Id))
+                    {
+                        _log.LogDebug("Device ID {0} already added, skipping", device.Id);
+                    }
+                    else
+                    {
+                        var googleState = _deviceRepository.Get(device.Id).GetGoogleState(_stateCache);
+                        if (googleState == null)
+                        {
+                            _log.LogDebug("Cached GoogleState for Device ID {0} is null, skipping", device.Id);
+                        }
+                        else
+                        {
+                            devices.Add(device.Id, googleState);
+                        }
+                    }
+                }
+            }
+            _log.LogDebug("Devices for response payload: " + JsonConvert.SerializeObject(devices));
+
+            _log.LogDebug("Building response payload");
             var queryResponsePayload = new Models.Response.QueryResponsePayload
             {
-                Devices = intent.Payload.Devices.ToDictionary(
-                    x => x.Id,
-                    x => _deviceRepository.Get(x.Id).GetGoogleState(_stateCache))
+                Devices = devices
             };
-
+            _log.LogDebug("queryResponsePayload: " + JsonConvert.SerializeObject(queryResponsePayload));
             return queryResponsePayload;
         }
 
@@ -209,6 +238,8 @@ namespace HomeAutio.Mqtt.GoogleHome.Controllers
                     CustomData = x.CustomData
                 }).ToList()
             };
+
+            _log.LogDebug("syncResponsePayload contains: " + JsonConvert.SerializeObject(syncResponsePayload));
 
             return syncResponsePayload;
         }

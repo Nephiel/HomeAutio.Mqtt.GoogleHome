@@ -148,11 +148,13 @@ namespace HomeAutio.Mqtt.GoogleHome
                 };
 
                 _log.LogDebug("Building requestMessage");
+                string contentString = JsonConvert.SerializeObject(request);
+                _log.LogDebug("Content: " + contentString);
                 var requestMessage = new HttpRequestMessage
                 {
                     Method = HttpMethod.Post,
                     RequestUri = new Uri(_googleHomeGraphApiReportStateUri),
-                    Content = new StringContent(JsonConvert.SerializeObject(request))
+                    Content = new StringContent(contentString)
                 };
 
                 _log.LogDebug("Adding access token");
@@ -235,7 +237,7 @@ namespace HomeAutio.Mqtt.GoogleHome
             var handler = new JwtSecurityTokenHandler();
             var token = handler.WriteToken(jwtToken);
 
-            _log.LogDebug("Built JWT request: " + token);
+            _log.LogDebug("Built JWT token: " + token);
 
             return token;
         }

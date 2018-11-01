@@ -9,6 +9,7 @@ using HomeAutio.Mqtt.GoogleHome.Models.Request;
 using HomeAutio.Mqtt.GoogleHome.Models.State;
 using Microsoft.Extensions.Logging;
 using MQTTnet;
+using Newtonsoft.Json;
 
 namespace HomeAutio.Mqtt.GoogleHome
 {
@@ -109,6 +110,8 @@ namespace HomeAutio.Mqtt.GoogleHome
                         .Where(x => x.WillReportState)
                         .Where(x => x.Traits.Any(trait => trait.State.Values.Any(state => state.Topic == e.ApplicationMessage.Topic)))
                         .ToList();
+
+                    _log.LogDebug("Identified devices: " + JsonConvert.SerializeObject(devices));
 
                     // Send updated to Google Home Graph
                     if (devices.Count() > 0)
